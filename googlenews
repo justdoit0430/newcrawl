@@ -1,0 +1,99 @@
+import requests
+import xml.etree.ElementTree as ET
+import pandas as pd
+from datetime import datetime
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Font
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse, parse_qs
+
+def format_date(date_str):
+try:
+return datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z').strftime('%Y-%m-%d')
+except ValueError:
+return date_str # 날짜 형식이 다른 경우 원래 문자열 반환
+
+def get_real_url(google_url):
+try:
+parsed_url = urlparse(google_url)
+query_params = parse_qs(parsed_url.query)
+if 'url' in query_params:
+return query_params['url'][0]
+except:
+pass
+return google_url
+
+def get_google_news(search_term):
+url = f"https://news.google.com/rss/search?q={search_term}&hl=en-US&gl=US&ceid=US:en"
+response = requests.get(url)
+root = ET.fromstring(response.content)
+
+news_items = []
+for item in root.findall('.//item'):
+pub_date_str = item.find('pubDate').text if item.find('pubDate') is not None else 'No date'
+title = item.find('title').text if item.find('title') is not None else 'No title'
+link = item.find('link').text if item.find('link') is not None else 'No link'
+real_link = get_real_url(link)
+news_items.append({
+'keyword': search_term,
+'title': title,
+'link': real_link,
+'published date': format_date(pub_date_str)
+})
+return news_items
+
+def process_keyword(search_word):
+print(f"Searching for: {search_word}")
+return get_google_news(search_word)
+
+# 수정된 검색 키워드 리스트
+search_keywords = ["Umicore","GM","Jaesae Neungwon","Silicon Anode","Solid-State Battery","Next-Generation Battery","Renault","CATL","Samsung SDI","LG Energy Solution","SK On","Panasonic","LG Chem","Toyota","Stellantis","BMW","FEOC","POSCO FUTURE M","POSCO","Cathode","Anode","Trump","Macroeconomics","L&F","EcoPro","Precursor","EV","ESS","Data Center","Power","AESC","Ford","Tesla","Rivian","Lucid","QuantumScape","Solid Power","Factorial Energy","Group14 Technologies","Sila Nanotechnologies","Enovix","Redwood Materials","Starplus Energy","DOE"]
+
+
+
+# 병렬로 뉴스 검색 실행
+final_news_list = []
+seen_titles = set()
+
+with ThreadPoolExecutor(max_workers=5) as executor:
+future_to_keyword = {executor.submit(process_keyword, keyword): keyword for keyword in search_keywords}
+for future in as_completed(future_to_keyword):
+keyword = future_to_keyword[future]
+try:
+news_items = future.result()
+for item in news_items:
+if item['title'] not in seen_titles:
+final_news_list.append([item['keyword'], item['published date'], item['title'], item['link']])
+seen_titles.add(item['title'])
+except Exception as exc:
+print(f'{keyword} generated an exception: {exc}')
+
+# 데이터 프레임 생성
+news_df = pd.DataFrame(final_news_list, columns=['Keyword', 'Date', 'Title', 'Link'])
+
+# 날짜순으로 정렬하고 중복 제거
+news_df['Date'] = pd.to_datetime(news_df['Date'], errors='coerce')
+news_df = news_df.sort_values('Date', ascending=False)
+news_df = news_df.drop_duplicates(subset=['Title'], keep='first')
+
+# 결과 확인
+print(f"총 {len(news_df)} 개의 뉴스 항목을 찾았습니다.")
+
+# 엑셀 파일로 저장
+file_name = f"aggregated_google_news_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+# 엑셀 파일에 하이퍼링크 적용
+wb = Workbook()
+ws = wb.active
+
+# 데이터프레임의 행을 엑셀 시트로 전송
+for r_idx, row in enumerate(dataframe_to_rows(news_df, index=False, header=True), 1):
+for c_idx, value in enumerate(row, 1):
+cell = ws.cell(row=r_idx, column=c_idx, value=value)
+if r_idx != 1 and c_idx == 4: # 첫 번째 행이 아니고, 네 번째 열(Link)일 때
+cell.hyperlink = value # Link 열의 URL을 하이퍼링크로 적용
+cell.font = Font(color='0000FF', underline='single') # 폰트 색상과 밑줄 설정
+
+wb.save(file_name)
+print(f"뉴스 데이터가 '{file_name}' 파일로 저장되었습니다.")
